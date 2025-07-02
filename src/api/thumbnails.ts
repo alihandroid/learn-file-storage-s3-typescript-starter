@@ -4,6 +4,7 @@ import { getVideo, updateVideo } from "../db/videos";
 import type { ApiConfig } from "../config";
 import type { BunRequest } from "bun";
 import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
+import path from "path";
 
 type Thumbnail = {
   data: ArrayBuffer;
@@ -60,11 +61,6 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
     throw new BadRequestError("Thumbnail is larger than 10MB");
   }
 
-  const mediaType = thumbnail.type;
-  const data = await thumbnail.arrayBuffer();
-  const base64Data = Buffer.from(data).toString("base64");
-  const dataURL = `data:${mediaType};base64,${base64Data}`;
-
   const video = getVideo(cfg.db, videoId);
   if (!video) {
     throw new NotFoundError("Video not found");
@@ -74,7 +70,14 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
     throw new UserForbiddenError("Wrong user");
   }
 
-  video.thumbnailURL = dataURL;
+  const extension = thumbnail.type.split("/").at(-1);
+  const data = await thumbnail.arrayBuffer();
+  const fileName = `${video.id}.${extension}`;
+
+  const targetPath = path.join(cfg.assetsRoot, fileName);
+
+  await Bun.write(targetPath, data);
+  video.thumbnailURL = `http://localhost:${cfg.port}/assets/${fileName}`;
 
   updateVideo(cfg.db, video);
 
