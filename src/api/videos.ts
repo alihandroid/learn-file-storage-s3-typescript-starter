@@ -54,7 +54,9 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
 
   await Bun.write(targetPath, data);
   const prefix = await getVideoAspectRatio(targetPath);
-  const localFile = Bun.file(targetPath);
+  const processedFilePath = await processVideoForFastStart(targetPath);
+  await Bun.file(targetPath).delete();
+  const localFile = Bun.file(processedFilePath);
   const s3File = cfg.s3Client.file(`${prefix}/${fileName}`);
   await s3File.write(localFile);
   await localFile.delete();
@@ -90,4 +92,20 @@ async function getVideoAspectRatio(filePath: string) {
   }
 
   return "other";
+}
+
+async function processVideoForFastStart(filePath: string) {
+  const outputFilePath = `${filePath}.processed`;
+
+  const subprocess = Bun.spawn({
+    cmd: ["ffmpeg", "-i", filePath, "-movflags", "faststart", "-map_metadata", "0", "-codec", "copy", "-f", "mp4", outputFilePath],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  if (await subprocess.exited !== 0) {
+    throw new Error(`Failed to process video for fast start ${filePath}: \n${await readableStreamToText(subprocess.stderr)}`)
+  }
+
+  return outputFilePath;
 }
