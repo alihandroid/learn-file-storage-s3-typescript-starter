@@ -70,6 +70,10 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
     throw new UserForbiddenError("Wrong user");
   }
 
+  if (thumbnail.type !== "image/png" && thumbnail.type !== "image/jpeg") {
+    throw new BadRequestError("Unsupported thumbnail format");
+  }
+
   const extension = thumbnail.type.split("/").at(-1);
   const data = await thumbnail.arrayBuffer();
   const fileName = `${video.id}.${extension}`;
