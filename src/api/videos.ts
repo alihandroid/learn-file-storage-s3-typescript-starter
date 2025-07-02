@@ -1,8 +1,93 @@
 import { respondWithJSON } from "./json";
 
 import { type ApiConfig } from "../config";
-import type { BunRequest } from "bun";
+import { readableStreamToText, type BunRequest } from "bun";
+import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
+import { getBearerToken, validateJWT } from "../auth";
+import { getVideo, updateVideo } from "../db/videos";
+import { randomBytes } from "node:crypto";
+import path from "node:path";
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
-  return respondWithJSON(200, null);
+  const { videoId } = req.params as { videoId?: string };
+  if (!videoId) {
+    throw new BadRequestError("Invalid video ID");
+  }
+
+  const token = getBearerToken(req.headers);
+  const userID = validateJWT(token, cfg.jwtSecret);
+
+  console.log("uploading thumbnail for video", videoId, "by user", userID);
+
+  const formData = await req.formData();
+
+  const videoData = formData.get("video");
+
+  if (!(videoData instanceof File)) {
+    throw new BadRequestError("Video is not a file");
+  }
+
+  const MAX_UPLOAD_SIZE = 1 << 30; // 1GB
+
+  if (videoData.size > MAX_UPLOAD_SIZE) {
+    throw new BadRequestError("Video is larger than 1GB");
+  }
+
+  const video = getVideo(cfg.db, videoId);
+  if (!video) {
+    throw new NotFoundError("Video not found");
+  }
+
+  if (video.userID != userID) {
+    throw new UserForbiddenError("Wrong user");
+  }
+
+  if (videoData.type !== "video/mp4") {
+    throw new BadRequestError("Unsupported video format");
+  }
+
+  const extension = videoData.type.split("/").at(-1);
+  const data = await videoData.arrayBuffer();
+  const fileName = `${randomBytes(32).toString("base64url")}.${extension}`;
+
+  const targetPath = path.join(cfg.assetsRoot, fileName);
+
+  await Bun.write(targetPath, data);
+  const prefix = await getVideoAspectRatio(targetPath);
+  const localFile = Bun.file(targetPath);
+  const s3File = cfg.s3Client.file(`${prefix}/${fileName}`);
+  await s3File.write(localFile);
+  await localFile.delete();
+
+  video.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${prefix}/${fileName}`
+
+  updateVideo(cfg.db, video);
+
+  return respondWithJSON(200, video);
+}
+
+async function getVideoAspectRatio(filePath: string) {
+  const subprocess = Bun.spawn({
+    cmd: ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", filePath],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const text = await readableStreamToText(subprocess.stdout);
+
+  if (await subprocess.exited !== 0) {
+    throw new Error(`Failed to read dimensions of ${filePath}: \n${await readableStreamToText(subprocess.stderr)}`)
+  }
+
+  const obj = JSON.parse(text).streams[0];
+  const aspectRatio = obj.width / obj.height;
+
+  if (Math.abs(aspectRatio - 16 / 9) < 0.01) {
+    return "landscape";
+  }
+
+  if (Math.abs(aspectRatio - 9 / 16) < 0.01) {
+    return "portrait";
+  }
+
+  return "other";
 }
