@@ -4,7 +4,7 @@ import { type ApiConfig } from "../config";
 import { readableStreamToText, type BunRequest } from "bun";
 import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
 import { getBearerToken, validateJWT } from "../auth";
-import { getVideo, updateVideo } from "../db/videos";
+import { getVideo, updateVideo, type Video } from "../db/videos";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 
@@ -57,15 +57,31 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const processedFilePath = await processVideoForFastStart(targetPath);
   await Bun.file(targetPath).delete();
   const localFile = Bun.file(processedFilePath);
-  const s3File = cfg.s3Client.file(`${prefix}/${fileName}`);
+  const key = `${prefix}/${fileName}`;
+  const s3File = cfg.s3Client.file(key);
   await s3File.write(localFile);
   await localFile.delete();
 
-  video.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${prefix}/${fileName}`
+  video.videoURL = key;
 
   updateVideo(cfg.db, video);
 
-  return respondWithJSON(200, video);
+  const signedVideo = dbVideoToSignedVideo(cfg, video);
+
+  return respondWithJSON(200, signedVideo);
+}
+
+function generatePresignedURL(cfg: ApiConfig, key: string, expireTime: number = 3600) {
+  return cfg.s3Client.presign(key, { expiresIn: expireTime });
+}
+
+export function dbVideoToSignedVideo(cfg: ApiConfig, video: Video) {
+  if (!video.videoURL) {
+    return video;
+  }
+
+  video.videoURL = generatePresignedURL(cfg, video.videoURL);
+  return video;
 }
 
 async function getVideoAspectRatio(filePath: string) {
